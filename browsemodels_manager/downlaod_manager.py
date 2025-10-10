@@ -1,4 +1,5 @@
 import subprocess
+import re
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -14,7 +15,6 @@ from PyQt6.QtWidgets import (
 from utils.screen_manager import ScreenManager
 
 
-# Worker thread for downloading
 class DownloadWorker(QThread):
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
@@ -28,31 +28,64 @@ class DownloadWorker(QThread):
 
     def run(self):
         try:
-            self.status.emit(f"Starting download: {self.model_name}:{self.model_size}")
-            cmd = ["ollama", "pull", f"{self.model_name}:{self.model_size}"]
+            full_model_name = f"{self.model_name}:{self.model_size}"
+            self.status.emit(f"📥 Starting download for {full_model_name}")
+            cmd = ["ollama", "pull", full_model_name]
 
             self.process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="ignore",
             )
 
+            progress_pattern = re.compile(r"(\d+)%")
+
             for line in self.process.stdout:
-                self.status.emit(line.strip())
-                # crude progress estimation (we can refine later)
-                if "%" in line:
-                    try:
-                        percent = int(line.split("%")[0].split()[-1])
-                        self.progress.emit(percent)
-                    except (ValueError, IndexError):
-                        pass
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Check for progress percentage
+                match = progress_pattern.search(line)
+                if match:
+                    percent = int(match.group(1))
+                    self.progress.emit(percent)
+                    continue
+
+                # Skip irrelevant lines
+                if any(
+                    keyword in line.lower()
+                    for keyword in [
+                        "pulling manifest",
+                        "verifying sha256",
+                        "digest",
+                        "config",
+                        "layer",
+                    ]
+                ):
+                    continue
+
+                # Emit only important updates
+                if "success" in line.lower():
+                    self.status.emit("✅ Download successful")
+                elif "error" in line.lower():
+                    self.status.emit(f"❌ Error: {line}")
+                else:
+                    self.status.emit(line)
 
             self.process.wait()
+
             if self.process.returncode == 0:
                 self.finished.emit(True)
             else:
                 self.finished.emit(False)
 
         except Exception as e:
-            self.status.emit(str(e))
+            self.status.emit(f"⚠️ Exception: {e}")
             self.finished.emit(False)
 
     def stop(self):
@@ -60,7 +93,6 @@ class DownloadWorker(QThread):
             self.process.terminate()
 
 
-# Download Manager Window
 class DownloadManager(QDialog):
     def __init__(self, model_name, sizes, parent=None):
         super().__init__(parent)
@@ -70,12 +102,9 @@ class DownloadManager(QDialog):
         self.setWindowTitle("Download Manager")
         self.setModal(True)
 
-        # Use dynamic window sizing for dialog
         width, height = ScreenManager.get_dialog_window_size(
             width_percentage=0.3, height_percentage=0.3, min_width=350, min_height=250
         )
-
-        # Center the window
         x, y = ScreenManager.calculate_window_position(width, height, center=True)
         self.setGeometry(x, y, width, height)
 
@@ -106,8 +135,6 @@ class DownloadManager(QDialog):
         self.setLayout(layout)
 
         self.worker = None
-        self.model_name = model_name
-
         self.start_btn.clicked.connect(self.start_download)
         self.cancel_btn.clicked.connect(self.cancel_download)
 
@@ -125,7 +152,7 @@ class DownloadManager(QDialog):
     def cancel_download(self):
         if self.worker:
             self.worker.stop()
-            self.update_log("Download canceled.")
+            self.update_log("🛑 Download canceled.")
             self.cancel_btn.setEnabled(False)
             self.start_btn.setEnabled(True)
 
@@ -137,7 +164,7 @@ class DownloadManager(QDialog):
 
     def download_finished(self, success):
         if success:
-            self.update_log("✅ Download completed successfully.")
+            self.update_log("🎉 Download completed successfully.")
         else:
             self.update_log("❌ Download failed.")
         self.start_btn.setEnabled(True)
